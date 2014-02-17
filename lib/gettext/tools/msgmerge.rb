@@ -87,6 +87,10 @@ module GetText
             entry.msgstr.nil?
           end
           @config = config
+          if @config.enable_fuzzy_matching?
+            @translated_entries_by_size = @translated_entries.sort { |x,y| x.msgid.size <=> y.msgid.size }
+            @qgram = Text::Qgram.new
+          end
         end
 
         def merge
@@ -120,7 +124,7 @@ module GetText
             end
           end
 
-          fuzzy_entry = find_fuzzy_entry(@translated_entries, msgid, msgctxt)
+          fuzzy_entry = find_fuzzy_entry(@translated_entries_by_size, msgid, msgctxt)
           if fuzzy_entry
             return merge_fuzzy_entry(entry, fuzzy_entry)
           end
@@ -174,37 +178,58 @@ module GetText
           merged_entry
         end
 
-        MAX_FUZZY_DISTANCE = 0.5 # XXX: make sure that its value is proper.
+        MAX_FUZZY_DISTANCE = 0.3 # To find duplicates, it assumes about 3 chars can be mistaken for each 10 you type
 
         def find_fuzzy_entry(definition, msgid, msgctxt)
           return nil if msgid == :last
           min_distance_entry = nil
-          min_distance = MAX_FUZZY_DISTANCE
+          min_distance = (MAX_FUZZY_DISTANCE*msgid.size).round
+          return nil if min_distance == 0
 
-          same_msgctxt_entries = definition.find_all do |entry|
-            entry.msgctxt == msgctxt and not entry.msgid == :last
-          end
-          same_msgctxt_entries.each do |entry|
-            distance = normalize_distance(entry.msgid, msgid)
-            next if distance.nil?
-            if min_distance > distance
-              min_distance = distance
-              min_distance_entry = entry
+          definition.each do |entry|
+            # If entry does not relate to the same context or if it is the same entry, discard and go on searching
+            should_consider_entry = (entry.msgctxt == msgctxt && entry.msgid != :last)
+            next unless should_consider_entry
+
+            # If size difference is too big we have to ignore the entry
+            n_characters_difference = (entry.msgid.size - msgid.size).abs
+            if n_characters_difference >  min_distance
+              # As definition is ordered by size: If entry.size is smaller, then go on searching, if entry.size is bigger then quit searching
+              if entry.msgid.size < msgid.size
+                next
+              else
+                break
+              end
+            end
+
+            # Posible candidate, calculate distance            
+            distance = calculate_distance(msgid, entry.msgid, min_distance)
+            if distance
+              min_distance = distance-1
+              min_distance_entry  = entry
+              break if min_distance < 2  # won't find any better match
             end
           end
-
           min_distance_entry
         end
 
-        MAX_N_CHARACTERS_DIFFERENCE = 10
-        def normalize_distance(source, destination)
-          n_characters_difference = (source.size - destination.size).abs
-          return nil if n_characters_difference > MAX_N_CHARACTERS_DIFFERENCE
-
+        def calculate_distance(source, destination, min_distance)
           max_size = [source.size, destination.size].max
-          return 0.0 if max_size.zero?
-
-          Text::Levenshtein.distance(source, destination) / max_size.to_f
+          if max_size.zero?
+            nil 
+          else
+            # Posible candidate, calculate aproximate distance with q-grams to discard false positives early
+            if @qgram.candidate?(source, destination, min_distance)
+              result = Text::Levenshtein.distance(source, destination, min_distance+1)
+              if result < min_distance
+                (result / source.size).round
+              else
+                nil
+              end
+            else
+              nil
+            end
+          end
         end
 
         def add_obsolete_entry(result)
